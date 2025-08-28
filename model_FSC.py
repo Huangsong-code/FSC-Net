@@ -101,37 +101,35 @@ class PermuteToChannelsFirst(nn.Module):
         return x.permute(0, 3, 1, 2)
 
 class GCA(nn.Module):
-    def __init__(self, dim, expansion_ratio=8 / 3, kernel_size=7, conv_ratio=1.0,
+    def __init__(self, dim, expansion_ratio=2.0, kernel_size=3, conv_ratio=1.0,
                  norm_layer=partial(nn.LayerNorm, eps=1e-6),
                  act_layer=nn.GELU,
-                 drop_path=0.01):
+                 drop_path=0.1):
         super().__init__()
         self.norm = norm_layer(dim)
         hidden = int(expansion_ratio * dim)
-        self.fc1 = nn.Linear(dim, hidden * 2)
+        self.fc1 = nn.Linear(dim, hidden)
         self.act = act_layer()
         conv_channels = int(conv_ratio * dim)
         self.split_indices = (hidden, hidden - conv_channels, conv_channels)
         self.conv = nn.Conv2d(conv_channels, conv_channels,
                               kernel_size=kernel_size,
-                              padding=kernel_size // 2,
+                              padding=kernel_size,
                               groups=conv_channels)
         self.fc2 = nn.Linear(hidden, dim)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-        # 添加维度转换层
         self.to_channels_last = PermuteToChannelsLast()
         self.to_channels_first = PermuteToChannelsFirst()
 
     def forward(self, x):
-        # 转换到 channels-last 格式
+   
         x = self.to_channels_last(x)
 
         shortcut = x
         x = self.norm(x)
         g, i, c = torch.split(self.fc1(x), self.split_indices, dim=-1)
 
-        # 转换到 channels-first 格式进行卷积
         c = self.to_channels_first(c)
         c = self.conv(c)
         c = self.to_channels_last(c)
@@ -141,19 +139,16 @@ class GCA(nn.Module):
         out = self.to_channels_first(out)
         out = self.drop_path(out)
 
-        # 转换回 channels-first 格式
         return out
 
 class FSA(nn.Module):
-    def __init__(self, in_channels, reduction_ratio=16):
+    def __init__(self, in_channels, reduction_ratio=4):
         super().__init__()
         self.in_channels = in_channels
         self.reduction_ratio = reduction_ratio
 
-        # 通道压缩层 (CX1X1)
-        self.conv_reduce = nn.Conv2d(2 * in_channels, in_channels, kernel_size=1)
+        self.conv_reduce = nn.Conv2d(2 * in_channels, in_channels, kernel_size=3)
 
-        # MLP层
         self.mlp = nn.Sequential(
             nn.Linear(in_channels, in_channels // reduction_ratio),
             nn.ReLU(inplace=True),
@@ -161,47 +156,40 @@ class FSA(nn.Module):
             nn.Sigmoid()
         )
 
-        # 池化层
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
 
     def forward(self, x):
-        # FFT变换
+
         fft = torch.fft.rfft2(x, norm='ortho')
         real, imag = fft.real, fft.imag
 
-        # 实部分支
         real_avg = self.avg_pool(real)
         real_max = self.max_pool(real)
         real_cat = torch.cat([real_avg, real_max], dim=1)
 
-        # 虚部分支
         imag_avg = self.avg_pool(imag)
         imag_max = self.max_pool(imag)
         imag_cat = torch.cat([imag_avg, imag_max], dim=1)
 
-        # 通道压缩
         real_reduced = self.conv_reduce(real_cat).squeeze(-1).squeeze(-1)
         imag_reduced = self.conv_reduce(imag_cat).squeeze(-1).squeeze(-1)
 
-        # MLP处理
         real_weights = self.mlp(real_reduced)[:, :, None, None]
         imag_weights = self.mlp(imag_reduced)[:, :, None, None]
 
-        # 应用注意力权重
         real_attended = real * real_weights
         imag_attended = imag * imag_weights
 
-        # IFFT变换
         fft_attended = torch.complex(real_attended, imag_attended)
-        output = torch.fft.irfft2(fft_attended, s=x.shape[-2:], norm='ortho')
+        output = torch.fft.irfft2(fft_attended, s=x.shape[-1:], norm='ortho')
 
         return output
 
 class SPT(nn.Module):
     def __init__(self, channel):
         super().__init__()
-        self.conv = nn.Conv2d(channel, channel, 3, padding=1, groups=channel)
+        self.conv = nn.Conv2d(channel, channel, 5, padding=1, groups=channel)
         self.norm = nn.BatchNorm2d(channel)
 
     def forward(self, x):
@@ -231,12 +219,12 @@ class DEE_module(nn.Module):
         self.FC2.apply(weights_init_kaiming)
         self.dropout = nn.Dropout(p=0.01)
 
-        self.gate1 = GCA(dim=channel//4, kernel_size=7, conv_ratio=0.5)
-        self.gate2 = GCA(dim=channel//4, kernel_size=7, conv_ratio=0.5)
-        self.spitial1 = SPT(channel=channel//4)
-        self.spitial2 = SPT(channel=channel//4)
-        self.freq_attn1 = FSA(channel//4)
-        self.freq_attn2 = FSA(channel//4)
+        self.gate1 = GCA(dim=channel//reduction, kernel_size=7, conv_ratio=0.5)
+        self.gate2 = GCA(dim=channel//reduction, kernel_size=7, conv_ratio=0.5)
+        self.spitial1 = SPT(channel=channel//reduction)
+        self.spitial2 = SPT(channel=channel//reduction)
+        self.freq_attn1 = FSA(channel//reduction)
+        self.freq_attn2 = FSA(channel//reduction)
 
     def forward(self, x):
         x1 = (self.FC11(x) + self.FC12(x) + self.FC13(x)) / 3
@@ -409,4 +397,5 @@ class embed_net(nn.Module):
 
             return x_pool, self.classifier(feat), loss_ort
         else:
+
             return self.l2norm(x_pool), self.l2norm(feat)
