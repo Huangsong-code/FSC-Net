@@ -147,7 +147,7 @@ class FSA(nn.Module):
         self.in_channels = in_channels
         self.reduction_ratio = reduction_ratio
 
-        self.conv_reduce = nn.Conv2d(2 * in_channels, in_channels, kernel_size=3)
+        self.conv_reduce = nn.Conv2d(in_channels, in_channels, kernel_size=3)
 
         self.mlp = nn.Sequential(
             nn.Linear(in_channels, in_channels // reduction_ratio),
@@ -399,3 +399,4 @@ class embed_net(nn.Module):
         else:
 
             return self.l2norm(x_pool), self.l2norm(feat)
+
