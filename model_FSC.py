@@ -100,100 +100,7 @@ class PermuteToChannelsFirst(nn.Module):
     def forward(self, x):
         return x.permute(0, 3, 1, 2)
 
-class GCA(nn.Module):
-    def __init__(self, dim, expansion_ratio=2.0, kernel_size=3, conv_ratio=1.0,
-                 norm_layer=partial(nn.LayerNorm, eps=1e-6),
-                 act_layer=nn.GELU,
-                 drop_path=0.1):
-        super().__init__()
-        self.norm = norm_layer(dim)
-        hidden = int(expansion_ratio * dim)
-        self.fc1 = nn.Linear(dim, hidden)
-        self.act = act_layer()
-        conv_channels = int(conv_ratio * dim)
-        self.split_indices = (hidden, hidden - conv_channels, conv_channels)
-        self.conv = nn.Conv2d(conv_channels, conv_channels,
-                              kernel_size=kernel_size,
-                              padding=kernel_size,
-                              groups=conv_channels)
-        self.fc2 = nn.Linear(hidden, dim)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-        self.to_channels_last = PermuteToChannelsLast()
-        self.to_channels_first = PermuteToChannelsFirst()
-
-    def forward(self, x):
-   
-        x = self.to_channels_last(x)
-
-        shortcut = x
-        x = self.norm(x)
-        g, i, c = torch.split(self.fc1(x), self.split_indices, dim=-1)
-
-        c = self.to_channels_first(c)
-        c = self.conv(c)
-        c = self.to_channels_last(c)
-        x = self.fc2(self.act(g) * torch.cat((i, c), dim=-1))
-
-        out = x + shortcut
-        out = self.to_channels_first(out)
-        out = self.drop_path(out)
-
-        return out
-
-class FSA(nn.Module):
-    def __init__(self, in_channels, reduction_ratio=4):
-        super().__init__()
-        self.in_channels = in_channels
-        self.reduction_ratio = reduction_ratio
-
-        self.conv_reduce = nn.Conv2d(in_channels, in_channels, kernel_size=3)
-
-        self.mlp = nn.Sequential(
-            nn.Linear(in_channels, in_channels // reduction_ratio),
-            nn.ReLU(inplace=True),
-            nn.Linear(in_channels // reduction_ratio, in_channels),
-            nn.Sigmoid()
-        )
-
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-    def forward(self, x):
-
-        fft = torch.fft.rfft2(x, norm='ortho')
-        real, imag = fft.real, fft.imag
-
-        real_avg = self.avg_pool(real)
-        real_max = self.max_pool(real)
-        real_cat = torch.cat([real_avg, real_max], dim=1)
-
-        imag_avg = self.avg_pool(imag)
-        imag_max = self.max_pool(imag)
-        imag_cat = torch.cat([imag_avg, imag_max], dim=1)
-
-        real_reduced = self.conv_reduce(real_cat).squeeze(-1).squeeze(-1)
-        imag_reduced = self.conv_reduce(imag_cat).squeeze(-1).squeeze(-1)
-
-        real_weights = self.mlp(real_reduced)[:, :, None, None]
-        imag_weights = self.mlp(imag_reduced)[:, :, None, None]
-
-        real_attended = real * real_weights
-        imag_attended = imag * imag_weights
-
-        fft_attended = torch.complex(real_attended, imag_attended)
-        output = torch.fft.irfft2(fft_attended, s=x.shape[-1:], norm='ortho')
-
-        return output
-
-class SPT(nn.Module):
-    def __init__(self, channel):
-        super().__init__()
-        self.conv = nn.Conv2d(channel, channel, 5, padding=1, groups=channel)
-        self.norm = nn.BatchNorm2d(channel)
-
-    def forward(self, x):
-        return x + torch.tanh(self.norm(self.conv(x)))
 
 class DEE_module(nn.Module):
     def __init__(self, channel, reduction=16):
@@ -399,4 +306,5 @@ class embed_net(nn.Module):
         else:
 
             return self.l2norm(x_pool), self.l2norm(feat)
+
 
